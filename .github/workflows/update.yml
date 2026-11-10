@@ -1,0 +1,65 @@
+name: Update Patches & CVEs
+
+on:
+  schedule:
+    - cron: '0 6 * * *'  # Daily at 06:00 UTC
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Update stable-queue patches
+        run: |
+          rm -rf patches/queue-* patches/staging-* active_kernel_versions README
+          git clone --depth 1 https://git.kernel.org/pub/scm/linux/kernel/git/stable/stable-queue.git /tmp/stable-queue
+          mkdir -p patches
+          cp -r /tmp/stable-queue/queue-* patches/
+          cp -r /tmp/stable-queue/staging-* patches/
+          cp /tmp/stable-queue/active_kernel_versions /tmp/stable-queue/README .
+
+      - name: Update CVE database
+        run: |
+          rm -rf /tmp/nvd-csv
+          git clone --depth 1 https://github.com/flying-coyote/nvd-csv.git /tmp/nvd-csv
+          mkdir -p cves
+          python3 << 'PYEOF'
+import csv, glob, os
+csv.field_size_limit(10**7)
+shards = sorted(glob.glob('/tmp/nvd-csv/data/shards/*.csv'))
+kernel_cves = []
+for shard in shards:
+    with open(shard, 'r') as f:
+        reader = csv.DictReader(f)
+        for row in reader:
+            prod = row.get('products', '').lower()
+            if 'linux kernel' in prod:
+                kernel_cves.append(row)
+
+kernel_cves.sort(key=lambda x: x.get('date_published', ''), reverse=True)
+with open('cves/linux_kernel_cves_full.csv', 'w', newline='') as f:
+    writer = csv.DictWriter(f, fieldnames=kernel_cves[0].keys())
+    writer.writeheader()
+    writer.writerows(kernel_cves)
+print(f"Updated: {len(kernel_cves)} Linux kernel CVEs")
+PYEOF
+
+      - name: Commit and push if changed
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          if ! git diff --quiet; then
+            git add -A
+            git commit -m "chore: daily update $(date +%F)"
+            git push
+          else
+            echo "No changes"
+          fi
